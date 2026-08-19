@@ -1,0 +1,134 @@
+name: DESIGN.md public stress corpus
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Assemble pinned public corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bundle/community/voltagent bundle/community/duply bundle/official/google bundle/repository-native
+          mkdir -p work
+
+          VOLTAGENT_COMMIT="8147538b4226ae41e2487a9179e3bcc1f68e8554"
+          DUPLY_COMMIT="fe8fdae011d7bbf3dec7671cea16ebd45cc86c37"
+          GOOGLE_COMMIT="9bf8eae67128b6cc55ad9bf86665767deb4c11cd"
+
+          curl --retry 4 --retry-all-errors -fsSL \
+            "https://codeload.github.com/VoltAgent/awesome-design-md/tar.gz/${VOLTAGENT_COMMIT}" \
+            -o work/voltagent.tar.gz
+          tar -xzf work/voltagent.tar.gz -C work
+          VOLTAGENT_ROOT="work/awesome-design-md-${VOLTAGENT_COMMIT}"
+          find "$VOLTAGENT_ROOT/design-md" -mindepth 2 -maxdepth 2 -name DESIGN.md -print0 \
+            | while IFS= read -r -d '' file; do
+                slug="$(basename "$(dirname "$file")")"
+                mkdir -p "bundle/community/voltagent/$slug"
+                cp "$file" "bundle/community/voltagent/$slug/DESIGN.md"
+              done
+          cp "$VOLTAGENT_ROOT/README.md" bundle/community/voltagent/README.md
+          cp "$VOLTAGENT_ROOT/LICENSE" bundle/community/voltagent/LICENSE
+
+          curl --retry 4 --retry-all-errors -fsSL \
+            "https://codeload.github.com/Duply-AI/design-md/tar.gz/${DUPLY_COMMIT}" \
+            -o work/duply.tar.gz
+          tar -xzf work/duply.tar.gz -C work
+          DUPLY_ROOT="work/design-md-${DUPLY_COMMIT}"
+          find "$DUPLY_ROOT/designs" -mindepth 2 -maxdepth 2 -name DESIGN.md -print0 \
+            | while IFS= read -r -d '' file; do
+                slug="$(basename "$(dirname "$file")")"
+                mkdir -p "bundle/community/duply/$slug"
+                cp "$file" "bundle/community/duply/$slug/DESIGN.md"
+              done
+          cp "$DUPLY_ROOT/README.md" bundle/community/duply/README.md
+          cp "$DUPLY_ROOT/LICENSE" bundle/community/duply/LICENSE
+
+          for example in atmospheric-glass paws-and-paths totality-festival; do
+            mkdir -p "bundle/official/google/$example"
+            curl --retry 4 --retry-all-errors -fsSL \
+              "https://raw.githubusercontent.com/google-labs-code/design.md/${GOOGLE_COMMIT}/examples/${example}/DESIGN.md" \
+              -o "bundle/official/google/$example/DESIGN.md"
+          done
+
+          : > bundle/NATIVE-FETCH-RESULTS.tsv
+          fetch_native() {
+            local id="$1" repo="$2" commit="$3" path="$4"
+            mkdir -p "bundle/repository-native/$id"
+            local url="https://raw.githubusercontent.com/${repo}/${commit}/${path}"
+            if curl --retry 3 --retry-all-errors -fsSL "$url" -o "bundle/repository-native/$id/DESIGN.md"; then
+              printf 'ok\t%s\t%s\t%s\t%s\n' "$id" "$repo" "$commit" "$path" >> bundle/NATIVE-FETCH-RESULTS.tsv
+            else
+              rm -rf "bundle/repository-native/$id"
+              printf 'missing\t%s\t%s\t%s\t%s\n' "$id" "$repo" "$commit" "$path" >> bundle/NATIVE-FETCH-RESULTS.tsv
+            fi
+          }
+
+          fetch_native nvidia-elements NVIDIA/elements 4d93214dcf0ebfb5bd005e985ebd98b984ae19a1 DESIGN.md
+          fetch_native exceptionless exceptionless/Exceptionless 24d6ad72a6659eec918c4655b531c099208912da DESIGN.md
+          fetch_native microsoft-constellation microsoft/github-constellation-software 5bc705b0f94bb8d9a641b178c02c3dc03b5b584e DESIGN.md
+          fetch_native harness-canary harness/canary 096f1cf04afd24d5852cb0a888c9c093c09ce90f DESIGN.md
+          fetch_native reablocks reaviz/reablocks f53a7bf5cc477ff5a8e0e895ed1a384bbf345de3 DESIGN.md
+          fetch_native bitcoin-keeper KeeperCommunity/bitcoin-keeper 3a7b53cc6caa144bd8988f76aa32482c92ee44c2 DESIGN.md
+          fetch_native openmates glowingkitty/OpenMates d5e4c327577b36db82e5fa7c5b3840577c34fd5d DESIGN.md
+          fetch_native reearth-terrain reearth/reearth-terrain 7a06c0e1538327ae109ed1732a798691aaf06604 DESIGN.md
+          fetch_native casa rubyforgood/casa 8e893b17cea2e40898c2bcf719f022c30a92646a design.md
+
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          root = Path('bundle')
+          rows = []
+          for path in sorted(root.rglob('DESIGN.md')):
+              data = path.read_bytes()
+              rel = path.relative_to(root).as_posix()
+              parts = rel.split('/')
+              rows.append({
+                  'path': rel,
+                  'bytes': len(data),
+                  'lines': data.count(b'\n') + 1,
+                  'sha256': hashlib.sha256(data).hexdigest(),
+                  'provenanceClass': parts[0],
+                  'sourceFamily': parts[1] if len(parts) > 2 else '',
+                  'slug': parts[-2],
+              })
+
+          manifest = {
+              'schemaVersion': '1',
+              'generatedAt': '2026-08-19',
+              'sources': {
+                  'VoltAgent/awesome-design-md': '8147538b4226ae41e2487a9179e3bcc1f68e8554',
+                  'Duply-AI/design-md': 'fe8fdae011d7bbf3dec7671cea16ebd45cc86c37',
+                  'google-labs-code/design.md': '9bf8eae67128b6cc55ad9bf86665767deb4c11cd',
+                  'repositoryNativeFiles': 'commits recorded in NATIVE-FETCH-RESULTS.tsv',
+              },
+              'count': len(rows),
+              'totalBytes': sum(r['bytes'] for r in rows),
+              'files': rows,
+          }
+          (root / 'CORPUS-MANIFEST.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+          (root / 'CHECKSUMS.sha256').write_text(
+              '\n'.join(f"{r['sha256']}  {r['path']}" for r in rows) + '\n',
+              encoding='utf-8',
+          )
+          print(json.dumps({'count': manifest['count'], 'totalBytes': manifest['totalBytes']}, indent=2))
+          PY
+
+      - name: Upload corpus artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: designmd-public-stress-corpus
+          path: bundle
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 1
