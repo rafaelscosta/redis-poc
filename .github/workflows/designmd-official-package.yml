@@ -1,0 +1,33 @@
+name: DESIGN.md official package export
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Pack pinned official parser
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          cd artifact
+          npm pack @google/design.md@0.4.0
+          sha256sum *.tgz > SHA256SUMS
+          node -e "const fs=require('fs');const p=require('./package.json');" 2>/dev/null || true
+          printf '{\n  "package": "@google/design.md",\n  "version": "0.4.0",\n  "node": "%s",\n  "npm": "%s"\n}\n' "$(node -v)" "$(npm -v)" > PACKAGE-METADATA.json
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-design-md-0.4.0
+          path: artifact
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 1
