@@ -1,0 +1,201 @@
+name: DESIGN.md official parser stress
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  official-parser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Assemble pinned public corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p corpus/community/voltagent corpus/community/duply corpus/official/google corpus/repository-native
+          VOLTAGENT_COMMIT="8147538b4226ae41e2487a9179e3bcc1f68e8554"
+          DUPLY_COMMIT="fe8fdae011d7bbf3dec7671cea16ebd45cc86c37"
+          GOOGLE_COMMIT="9bf8eae67128b6cc55ad9bf86665767deb4c11cd"
+
+          curl -fsSL --retry 3 "https://codeload.github.com/VoltAgent/awesome-design-md/tar.gz/${VOLTAGENT_COMMIT}" -o voltagent.tar.gz
+          tar -xzf voltagent.tar.gz
+          find "awesome-design-md-${VOLTAGENT_COMMIT}/design-md" -mindepth 2 -maxdepth 2 -name DESIGN.md -print0 | while IFS= read -r -d '' file; do
+            slug="$(basename "$(dirname "$file")")"
+            mkdir -p "corpus/community/voltagent/$slug"
+            cp "$file" "corpus/community/voltagent/$slug/DESIGN.md"
+          done
+
+          curl -fsSL --retry 3 "https://codeload.github.com/Duply-AI/design-md/tar.gz/${DUPLY_COMMIT}" -o duply.tar.gz
+          tar -xzf duply.tar.gz
+          find "design-md-${DUPLY_COMMIT}/designs" -mindepth 2 -maxdepth 2 -name DESIGN.md -print0 | while IFS= read -r -d '' file; do
+            slug="$(basename "$(dirname "$file")")"
+            mkdir -p "corpus/community/duply/$slug"
+            cp "$file" "corpus/community/duply/$slug/DESIGN.md"
+          done
+
+          for example in atmospheric-glass paws-and-paths totality-festival; do
+            mkdir -p "corpus/official/google/$example"
+            curl -fsSL --retry 3 "https://raw.githubusercontent.com/google-labs-code/design.md/${GOOGLE_COMMIT}/examples/${example}/DESIGN.md" -o "corpus/official/google/$example/DESIGN.md"
+          done
+
+          fetch_native() {
+            local id="$1" repo="$2" commit="$3" path="$4"
+            mkdir -p "corpus/repository-native/$id"
+            if ! curl -fsSL --retry 3 "https://raw.githubusercontent.com/${repo}/${commit}/${path}" -o "corpus/repository-native/$id/DESIGN.md"; then
+              rm -rf "corpus/repository-native/$id"
+            fi
+          }
+          fetch_native nvidia-elements NVIDIA/elements 4d93214dcf0ebfb5bd005e985ebd98b984ae19a1 DESIGN.md
+          fetch_native exceptionless exceptionless/Exceptionless 24d6ad72a6659eec918c4655b531c099208912da DESIGN.md
+          fetch_native microsoft-constellation microsoft/github-constellation-software 5bc705b0f94bb8d9a641b178c02c3dc03b5b584e DESIGN.md
+          fetch_native harness-canary harness/canary 096f1cf04afd24d5852cb0a888c9c093c09ce90f DESIGN.md
+          fetch_native reablocks reaviz/reablocks f53a7bf5cc477ff5a8e0e895ed1a384bbf345de3 DESIGN.md
+          fetch_native bitcoin-keeper KeeperCommunity/bitcoin-keeper 3a7b53cc6caa144bd8988f76aa32482c92ee44c2 DESIGN.md
+          fetch_native openmates glowingkitty/OpenMates d5e4c327577b36db82e5fa7c5b3840577c34fd5d DESIGN.md
+          fetch_native reearth-terrain reearth/reearth-terrain 7a06c0e1538327ae109ed1732a798691aaf06604 DESIGN.md
+          fetch_native casa rubyforgood/casa 8e893b17cea2e40898c2bcf719f022c30a92646a design.md
+          echo "Corpus files: $(find corpus -type f -name DESIGN.md | wc -l)"
+
+      - name: Install official parser
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund --save-exact @google/design.md@0.4.0
+
+      - name: Execute official compatibility matrix
+        shell: bash
+        run: |
+          cat > official-stress.mjs <<'EOF'
+          import { readdir, readFile, mkdir, writeFile } from 'node:fs/promises';
+          import { join, relative } from 'node:path';
+          import { performance } from 'node:perf_hooks';
+          import { createHash } from 'node:crypto';
+          import { lint } from '@google/design.md/linter';
+
+          const root = 'corpus';
+          const out = 'official-stress-output';
+          const sha256 = (value) => createHash('sha256').update(value).digest('hex');
+          const entries = (value) => value instanceof Map ? [...value.entries()] : Object.entries(value ?? {});
+          async function walk(dir) {
+            const result = [];
+            for (const item of await readdir(dir, { withFileTypes: true })) {
+              const path = join(dir, item.name);
+              if (item.isDirectory()) result.push(...await walk(path));
+              else if (item.isFile() && item.name.toLowerCase() === 'design.md') result.push(path);
+            }
+            return result;
+          }
+          function normalize(value, seen = new WeakSet()) {
+            if (value instanceof Map) return Object.fromEntries([...value.entries()].sort(([a],[b]) => String(a).localeCompare(String(b))).map(([k,v]) => [k, normalize(v, seen)]));
+            if (Array.isArray(value)) return value.map((item) => normalize(item, seen));
+            if (value && typeof value === 'object') {
+              if (seen.has(value)) return '[Circular]';
+              seen.add(value);
+              return Object.fromEntries(Object.keys(value).sort().map((key) => [key, normalize(value[key], seen)]));
+            }
+            return value;
+          }
+          function q(values, ratio) {
+            if (!values.length) return 0;
+            const sorted = [...values].sort((a,b) => a-b);
+            return Number(sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * ratio) - 1)].toFixed(3));
+          }
+          const files = (await walk(root)).sort();
+          const cases = [];
+          const durations = [];
+          let peakRss = process.memoryUsage().rss;
+          for (const path of files) {
+            const source = await readFile(path, 'utf8');
+            const item = { path: relative(root, path).replaceAll('\\', '/'), bytes: Buffer.byteLength(source), sourceHash: sha256(source) };
+            try {
+              const started = performance.now();
+              const first = lint(source);
+              const durationMs = performance.now() - started;
+              const second = lint(source);
+              const firstSnapshot = JSON.stringify(normalize(first));
+              const secondSnapshot = JSON.stringify(normalize(second));
+              durations.push(durationMs);
+              const ds = first.designSystem ?? {};
+              item.status = 'renderable';
+              item.durationMs = Number(durationMs.toFixed(3));
+              item.deterministic = firstSnapshot === secondSnapshot;
+              item.summary = first.summary;
+              item.findings = (first.findings ?? []).map((finding) => ({ severity: finding.severity, rule: finding.rule, path: finding.path, message: finding.message }));
+              item.counts = {
+                colors: entries(ds.colors).length,
+                typography: entries(ds.typography).length,
+                spacing: entries(ds.spacing).length,
+                rounded: entries(ds.rounded).length,
+                components: entries(ds.components).length,
+                sections: Array.isArray(first.documentSections) ? first.documentSections.length : 0,
+                unknownKeys: Array.isArray(ds.unknownKeys) ? ds.unknownKeys.length : 0,
+              };
+              item.snapshotHash = sha256(firstSnapshot);
+            } catch (error) {
+              item.status = 'fatal';
+              item.error = { name: error?.name ?? 'Error', message: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack?.split('\n').slice(0, 8).join('\n') : undefined };
+            }
+            cases.push(item);
+            peakRss = Math.max(peakRss, process.memoryUsage().rss);
+          }
+          const successful = cases.filter((item) => item.status === 'renderable');
+          const failures = cases.filter((item) => item.status === 'fatal');
+          const findingCounts = {};
+          for (const item of successful) for (const finding of item.findings) {
+            const key = finding.rule || 'unclassified';
+            findingCounts[key] = (findingCounts[key] ?? 0) + 1;
+          }
+          const report = {
+            schemaVersion: '1',
+            parser: '@google/design.md@0.4.0',
+            corpusFiles: files.length,
+            summary: {
+              successful: successful.length,
+              fatal: failures.length,
+              fatalRate: files.length ? failures.length / files.length : 0,
+              deterministic: successful.filter((item) => item.deterministic).length,
+              deterministicFailures: successful.filter((item) => !item.deterministic).length,
+              findings: successful.reduce((acc, item) => {
+                acc.errors += item.summary?.errors ?? 0;
+                acc.warnings += item.summary?.warnings ?? 0;
+                acc.infos += item.summary?.infos ?? 0;
+                return acc;
+              }, { errors: 0, warnings: 0, infos: 0 }),
+              performanceMs: { min: durations.length ? Number(Math.min(...durations).toFixed(3)) : 0, median: q(durations, .5), p95: q(durations, .95), p99: q(durations, .99), max: durations.length ? Number(Math.max(...durations).toFixed(3)) : 0 },
+              peakRssBytes: peakRss,
+            },
+            findingCounts: Object.entries(findingCounts).sort((a,b) => b[1]-a[1] || a[0].localeCompare(b[0])).map(([rule,count]) => ({ rule, count })),
+            failures,
+            cases,
+          };
+          await mkdir(out, { recursive: true });
+          await writeFile(join(out, 'official-parser-stress-report.json'), JSON.stringify(report, null, 2) + '\n');
+          const md = [
+            '# Official DESIGN.md Parser Stress Report', '',
+            `- Parser: ${report.parser}`,
+            `- Corpus: ${report.corpusFiles}`,
+            `- Successful: ${report.summary.successful}`,
+            `- Fatal: ${report.summary.fatal}`,
+            `- Deterministic: ${report.summary.deterministic}/${report.summary.successful}`,
+            `- p95: ${report.summary.performanceMs.p95} ms`, '',
+            '## Fatal cases', '',
+            ...(failures.length ? failures.map((item) => `- \`${item.path}\` — ${item.error.message}`) : ['None.']), '',
+          ].join('\n');
+          await writeFile(join(out, 'official-parser-stress-report.md'), md);
+          console.log(JSON.stringify(report.summary, null, 2));
+          EOF
+          node official-stress.mjs
+
+      - name: Upload official-parser report
+        uses: actions/upload-artifact@v4
+        with:
+          name: designmd-official-parser-stress
+          path: official-stress-output
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 1
