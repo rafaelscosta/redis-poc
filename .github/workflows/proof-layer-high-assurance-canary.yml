@@ -1,0 +1,48 @@
+name: Proof Layer High-Assurance Canary
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  high-assurance-canary:
+    name: seccomp + cgroup v2 + OCI identity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+
+      - name: Execute measured controls
+        shell: bash
+        run: bash .proof-layer-canary/run-canary.sh proof-layer-canary-evidence
+
+      - name: Publish job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## Proof Layer High-Assurance Canary'
+            echo
+            if [[ -f proof-layer-canary-evidence/evidence.json ]]; then
+              echo '```json'
+              cat proof-layer-canary-evidence/evidence.json
+              echo '```'
+            else
+              echo 'Evidence was not produced.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload canary evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-layer-high-assurance-canary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: proof-layer-canary-evidence
+          if-no-files-found: error
+          retention-days: 7
